@@ -15,7 +15,7 @@
 #include "EEPROMAnything.h"
 
 // comment/undef this to disable debugging
-#define DEBUG 1
+//#define DEBUG 1
 
 #ifndef DEBUG
 #define Serial if(0)Serial
@@ -98,17 +98,17 @@ struct FoodInfo
   char name[50];
 } foodInfo;
 
-int lastButtonState = LOW;   // the previous reading from the input pin
+int lastButtonState = LOW;   // the last known state state of the button
 // the following variables are unsigned longs because the time, measured in
 // milliseconds, will quickly become a bigger number than can be stored in an int.
-unsigned long lastDebounceTime = 0;  // the last time the output pin was toggled
-unsigned long longPressTime = 3000;    // the debounce time; increase if the output flickers
+unsigned long lastDebounceTime = 0;  // the last time the button was toggled in ms
+unsigned long longPressTime = 2000;    // the time to consider a long press in ms
 
 //=============================================================================================
 //                         SETUP
 //=============================================================================================
 void setup() {
-  Serial.begin(9600,SERIAL_8N1,SERIAL_TX_ONLY); 
+  Serial.begin(9600, SERIAL_8N1,SERIAL_TX_ONLY); 
   
   pinMode(PW_SW_PIN, OUTPUT);
   pinMode(TARE_BTN_PIN, INPUT);
@@ -117,10 +117,7 @@ void setup() {
   
   digitalWrite(BUILTIN_LED, HIGH); // built-in led HIGH means off
   digitalWrite(PW_SW_PIN, HIGH); // keep the power (sent to Mosfet)
-  //digitalWrite(LOGO_LED_PIN, HIGH);
-  analogWrite(LOGO_LED_PIN, 1023);  // logo led on
-
-  //Serial.begin(9600);
+  analogWrite(LOGO_LED_PIN, 600);  // logo led partially lit with PWM
   
   _debugPrintln("Healthzuilla Scale at your service !");
   display.begin();
@@ -264,7 +261,9 @@ void setup() {
 }
 
 // -------------------------------------------------------------------------
-
+/**
+ * Connect to WiFi
+ */
 void wifiConfig()
 {
   display.fillRect(0, 30, 84, 18, WHITE);
@@ -344,11 +343,17 @@ float readVoltage()
   _debugPrintln(displayBuffer);
   
   return voltage;
-  
 }
 
 // -------------------------------------------------------------------------
 
+/**
+ * Get battery level from voltage
+ *
+ * @param float voltage
+ *
+ * @return uint8_t battery level 0..100 
+ */
 uint8_t getLiPoBatteryLevel(float voltage)
 {
   if (voltage >= 4.14) {
@@ -397,7 +402,9 @@ uint8_t getLiPoBatteryLevel(float voltage)
 }
 
 // -------------------------------------------------------------------------
-
+/**
+ * Turn tbe device off by putting the keep-alive pin low
+ */
 void powerOff()
 {
   _debugPrintln("Power off.");
@@ -837,7 +844,7 @@ void readScale()
 }
 
 /**
- * Delay but prevent WDT reset
+ * Delay, but prevent WDT reset
  */
 void safeDelay(uint32_t milliseconds)
 {
@@ -852,6 +859,10 @@ void safeDelay(uint32_t milliseconds)
   delay(milliseconds % delayTime);
 }
 
+/**
+ * Simple routine to blink the built-in led once with a 300ms delay
+ * Used with a timer
+ */
 void blinkStatusLed()
 {
   digitalWrite(LED_BUILTIN, LOW);
