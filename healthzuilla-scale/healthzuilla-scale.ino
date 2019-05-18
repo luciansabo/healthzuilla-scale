@@ -29,7 +29,7 @@ const int8_t LCD_DC_PIN     = D6; // scale DC pin
 const int8_t PW_SW_PIN      = D0; // GPIO16 is controlling the power. LOW - power on, HIGH - power off
 const int8_t SCALE_DOUT_PIN = 5;  // scale DOUT on GPIO5
 const int8_t SCALE_CLK_PIN  = 4;  // scale CLK on GPIO4
-const int8_t TARE_BTN_PIN  = D8;  // scale CLK on GPIO4
+const int8_t TARE_BTN_PIN  = D8;  // Tare btn pin
 const int8_t LOGO_LED_PIN  = D3;  // logo LED on GPIO0 (HIGH on boot)
 
 const uint8_t DEFAULT_POWEROFF_SEC = 300;
@@ -98,7 +98,7 @@ struct FoodInfo
   char name[50];
 } foodInfo;
 
-int lastButtonState = LOW;   // the last known state state of the button
+volatile int lastButtonState = LOW;   // the last known state state of the button
 // the following variables are unsigned longs because the time, measured in
 // milliseconds, will quickly become a bigger number than can be stored in an int.
 unsigned long lastDebounceTime = 0;  // the last time the button was toggled in ms
@@ -257,7 +257,6 @@ void setup() {
   }
   displayHelper.renderBatteryLevel(batteryLevel);
   displayHelper.renderAll();
-  yield();
 }
 
 // -------------------------------------------------------------------------
@@ -292,8 +291,9 @@ void wifiConfig()
   yield();
 
   int counter = 0;
-  while (WiFi.status() != WL_CONNECTED && (counter <= 100)) {
-    if (counter % 10 == 0) {
+  // 15s timeout
+  while (WiFi.status() != WL_CONNECTED && (counter <= 150)) {
+    if (counter % 15 == 0) {
       _debugPrint(".");
       display.print(".");
       display.display();
@@ -318,14 +318,15 @@ void wifiConfig()
  * Read an average analog value from pin 0
  * Analog reading goes from 0 - 1023. ADC voltage range is 0 - 1V
  */
-uint16_t readADC()
+float readADC()
 { 
-  int adcValue = 0;
-  for (int i = 0; i < 10; i++) {
-    adcValue = adcValue + analogRead(A0);
+  float adcValue = 0;
+  uint8_t numReading = 15;
+  for (int i = 0; i < numReading; i++) {
+    adcValue += analogRead(A0);
   }
   
-  return round(adcValue / 10.0);
+  return adcValue / numReading;
 }
 
 // -------------------------------------------------------------------------
@@ -336,7 +337,8 @@ uint16_t readADC()
  */
 float readVoltage()
 {
-  uint16_t adcValue = readADC();
+  float adcValue = readADC();
+
   float voltage = adcValue * settings.voltageCalibrationFactor;
   
   sprintf(displayBuffer, "Read voltage: %.2f; ADC value: %d", voltage, adcValue);
@@ -356,7 +358,7 @@ float readVoltage()
  */
 uint8_t getLiPoBatteryLevel(float voltage)
 {
-  if (voltage >= 4.14) {
+  if (voltage >= 4.13) {
     return 100;
   } else if (voltage > 4.10) {
     return 95;
