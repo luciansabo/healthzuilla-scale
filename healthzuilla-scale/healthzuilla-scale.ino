@@ -410,6 +410,7 @@ uint8_t getLiPoBatteryLevel(float voltage)
 void powerOff()
 {
   _debugPrintln("Power off.");
+  WiFi.mode(WIFI_OFF);
   digitalWrite(PW_SW_PIN, LOW);
 }
 
@@ -871,6 +872,3 @@ void blinkStatusLed()
   delay(300); // 0.5s lit then turn off
   digitalWrite(LED_BUILTIN, HIGH);
 }
-
-
-
