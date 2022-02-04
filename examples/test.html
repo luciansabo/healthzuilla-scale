@@ -1,0 +1,23 @@
+<script
+        src="https://code.jquery.com/jquery-3.6.0.min.js"
+        integrity="sha256-FgpCb/KJQlLNfOu91ta32o/NMZxltwRo8QtmkMRdAu8="
+        crossorigin=""></script>
+
+<script>
+    var scaleApiUrl = 'https://healthzuilla-scale.local/api';
+
+    $.ajax({
+        url: scaleApiUrl + "/device/info",
+        method: "GET",
+        dataType: 'json',
+        crossDomain: true,
+        error: function(responseData, textStatus, errorThrown){
+            console.log(responseData);
+            alert("Communication error" + textStatus);
+        },
+        success: function(data){
+            console.log( data );
+            alert("Battery voltage: " + data.battery.voltage);
+        }
+    });
+</script>

@@ -1,10 +1,18 @@
 /**
- * Healthzuilla Scale - smart kitchen scale with WiFI and web API
+ * Healthzuilla Scale
+ * v 2022.2
+ * Smart kitchen scale with WiFI and web API
+ * 
+ * Designed for Wemos D1 mini but should work with any ESP8266 board
+ * Board in Arduino IDE: Lolin (Wemos) D1 R2 & mini
+ * CPU Freq: 160 Mhz (needed for SSL)
  */
 #include <HX711.h>  // https://github.com/bogde/HX711
 #include <DNSServer.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
+#include <ESP8266WebServerSecure.h>
 #include <WiFiManager.h>         // https://github.com/tzapu/WiFiManager
 #include <DoubleResetDetector.h> // https://github.com/datacute/DoubleResetDetector
 #include <Adafruit_GFX.h> // https://github.com/adafruit/Adafruit-GFX-Library
@@ -13,9 +21,9 @@
 #include <MovingAverage.h> // http://github.com/sofian/MovingAverage
 #include "DisplayHelper.h"
 #include "EEPROMAnything.h"
+#include "healthzuilla-scale.h"
+#include "config.h"
 
-// comment/undef this to disable debugging
-//#define DEBUG 1
 
 #ifndef DEBUG
 #define Serial if(0)Serial
@@ -24,60 +32,20 @@
 #define _debugPrint(message) Serial.print(message);
 #define _debugPrintln(message) Serial.println(message);
 
-// Pins
-const int8_t LCD_DC_PIN     = D6; // scale DC pin
-const int8_t PW_SW_PIN      = D0; // GPIO16 is controlling the power. LOW - power on, HIGH - power off
-const int8_t SCALE_DOUT_PIN = 5;  // scale DOUT on GPIO5
-const int8_t SCALE_CLK_PIN  = 4;  // scale CLK on GPIO4
-const int8_t TARE_BTN_PIN  = D8;  // Tare btn pin
-const int8_t LOGO_LED_PIN  = D3;  // logo LED on GPIO0 (HIGH on boot)
-
-const uint8_t DEFAULT_POWEROFF_SEC = 300;
-const uint8_t DEFAULT_IDLE_POWEROFF_SEC = 90;
-
-// ID of the settings block
-#define CONFIG_VERSION "ls1"
-
-// Tell it where to store your config data in EEPROM
-#define CONFIG_START_ADDR 0
-
-// Number of seconds after reset during which a
-// subseqent reset will be considered a double reset.
-#define DRD_TIMEOUT 5
-
-// RTC Memory Address for the DoubleResetDetector to use
-#define DRD_ADDRESS 0
-
-const char configPortalAP[] = "Healthzuilla-Scale";
-const uint8_t SETUP_TIMEOUT = 300; // Timeout for Config portal: 5 min
-const uint8_t READ_INTERVAL = 1000; // 1s scale reading interval
-const uint16_t LOW_BATTERY_BLINK_DELAY = 3000; // 4s delay between low battery blinks
-
 HX711 scale;
 Adafruit_PCD8544 display = Adafruit_PCD8544(LCD_DC_PIN, 0, 0);
+DisplayHelper displayHelper(&display);
 WiFiManager wifiManager;
 DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
-ESP8266WebServer server(80);
+BearSSL::ESP8266WebServerSecure httpsServer(443);
 SimpleTimer timer;
-int readTimerId, powerOffTimerId, idleTimerId;
+int readTimerId, powerOffTimerId, idleTimerId, wifiStartTimer;
 float reading;
 char displayBuffer[500];
 MovingAverage average;
+bool wifiConnectStarted = false;
 
-struct HealthzuillaScaleSettings {
-  // This is for mere detection if they are your settings
-  char version[4];
-  bool useStaticIp;
-  char ip[16];
-  char gateway[16];
-  char subnetMask[16];
-  float calibrationFactor;
-  long zeroFactor;
-  float calibrationWeight;
-  uint16_t powerOffTimerSec;
-  uint16_t idlePowerOffTimerSec;
-  double voltageCalibrationFactor;
-} settings = {
+HealthzuillaScaleSettings settings = {
   CONFIG_VERSION, // config version
   true, // useStaticIp
   "192.168.1.11", // ip
@@ -91,37 +59,52 @@ struct HealthzuillaScaleSettings {
   0.004967148 // voltage calibration factor
 };
 
-struct FoodInfo
-{
-  char foodId[32];
-  unsigned short calories;
-  char name[50];
-} foodInfo;
+FoodInfo foodInfo;
 
 volatile int lastButtonState = LOW;   // the last known state state of the button
 // the following variables are unsigned longs because the time, measured in
 // milliseconds, will quickly become a bigger number than can be stored in an int.
 unsigned long lastDebounceTime = 0;  // the last time the button was toggled in ms
-unsigned long longPressTime = 2000;    // the time to consider a long press in ms
 
+void startConfigPortal()
+{
+  _debugPrintln("Starting config portal");
+  display.setCursor(0, 30);
+  display.fillRect(0, 30, 84, 18, WHITE);
+  display.print("Configure me");
+  display.display();
+  
+  // blink two times to signal Config Portal mode
+  digitalWrite(LOGO_LED_PIN, LOW);
+  delay(1000);
+  digitalWrite(LOGO_LED_PIN, HIGH);
+  delay(500);
+  digitalWrite(LOGO_LED_PIN, LOW);
+  delay(1000);
+  digitalWrite(LOGO_LED_PIN, HIGH);
+  delay(500);
+  digitalWrite(LOGO_LED_PIN, LOW);
+  wifiManager.setConfigPortalTimeout(SETUP_TIMEOUT);
+  wifiManager.startConfigPortal(configPortalAP);
+}
 //=============================================================================================
 //                         SETUP
 //=============================================================================================
-void setup() {
-  Serial.begin(9600, SERIAL_8N1,SERIAL_TX_ONLY); 
+void setup()
+{
+  Serial.begin(115200, SERIAL_8N1,SERIAL_TX_ONLY); 
   
   pinMode(PW_SW_PIN, OUTPUT);
   pinMode(TARE_BTN_PIN, INPUT);
   pinMode(BUILTIN_LED, OUTPUT);
-  pinMode(LOGO_LED_PIN, OUTPUT);
+  pinMode(LOGO_LED_PIN, OUTPUT);  
   
   digitalWrite(BUILTIN_LED, HIGH); // built-in led HIGH means off
   digitalWrite(PW_SW_PIN, HIGH); // keep the power (sent to Mosfet)
   analogWrite(LOGO_LED_PIN, 600);  // logo led partially lit with PWM
   
   _debugPrintln("Healthzuilla Scale at your service !");
-  display.begin();
-  yield();
+  display.begin();  
   display.setContrast(60);  // Adjust for your display
   display.setTextColor(BLACK);
   display.clearDisplay();
@@ -132,7 +115,15 @@ void setup() {
   display.print("Healthzuilla");
   display.setCursor(27, 14);
   display.println("Scale");
-  display.setTextColor(BLACK);
+  display.setTextColor(BLACK);  
+
+  display.setTextSize(1);
+  display.fillRect(0, 35, 84, 18, WHITE);
+  strcpy(displayBuffer, "Btn skips WiFi");    
+  display.setCursor(0, 35);
+  display.print(displayBuffer);
+  
+  display.display();
 
   EEPROM.begin(sizeof(settings));
   //HealthzuillaScaleSettings oldSettings = settings;
@@ -143,33 +134,36 @@ void setup() {
   wifiManager.setSaveConfigCallback(saveConfigCallback);
 
   if (drd.detectDoubleReset()) {
-    _debugPrintln("Starting config portal");
-    display.setCursor(0, 30);
-    display.fillRect(0, 30, 84, 18, WHITE);
-    display.print("Configure me");
-    display.display();
-
-    // blink two times to signal Config Portal mode
-    digitalWrite(LOGO_LED_PIN, LOW);
-    delay(1000);
-    digitalWrite(LOGO_LED_PIN, HIGH);
-    delay(500);
-    digitalWrite(LOGO_LED_PIN, LOW);
-    delay(1000);
-    digitalWrite(LOGO_LED_PIN, HIGH);
-    delay(500);
-    digitalWrite(LOGO_LED_PIN, LOW);
-    wifiManager.setConfigPortalTimeout(SETUP_TIMEOUT);
-    wifiManager.startConfigPortal(configPortalAP);
+    startConfigPortal();
   }
 
-  scale.begin(SCALE_DOUT_PIN, SCALE_CLK_PIN);
-  yield();
-  scale.tare(5); //Reset the scale to 0
-  yield();
-  wifiConfig();
-  yield();
-  analogWrite(LOGO_LED_PIN, 200);  // logo led partially lit
+  scale.begin(SCALE_DOUT_PIN, SCALE_CLK_PIN);  
+  scale.tare(5); //Reset the scale to 0  
+  
+  timer.setTimeout(3000, onReady);  
+  wifiStartTimer = timer.setTimeout(3100, wifiConnect);
+
+  httpsServer.client().setTimeout(300);
+  httpsServer.on ( "/api/calibrate", HTTP_POST, handleCalibrate );
+  httpsServer.on ( "/api/settings", HTTP_PATCH, handleSettingsChanged );
+  httpsServer.on ( "/api/settings", HTTP_GET, handleGetSettings );
+  httpsServer.on ( "/api/weight", HTTP_GET, handleGetWeight );
+  httpsServer.on ( "/api/weight", HTTP_POST, handlePostWeight );
+  httpsServer.on ( "/api/tare", HTTP_POST, handleTare );
+  httpsServer.on ( "/api/device/poweroff", HTTP_POST, handlePowerOff );
+  httpsServer.on ( "/api/device/reset", HTTP_POST, handleReset );
+  httpsServer.on ( "/api/device/info", HTTP_GET, handleInfo );
+  httpsServer.on ( "/api/device/calibrate-adc", HTTP_POST, handleCalibrateAdc );
+  httpsServer.begin();   // Start the webserver;    
+  httpsServer.getServer().setRSACert(new BearSSL::X509List(serverCert), new BearSSL::PrivateKey(serverKey));
+  _debugPrintln("Server listening");
+
+  // Start the mDNS responder
+  if (!MDNS.begin("healthzuilla-scale")) {
+   _debugPrintln("Error setting up MDNS responder!");
+  } else {
+    _debugPrintln("mDNS responder started");
+  }
   
   long calibrationError = abs(settings.zeroFactor - scale.get_offset());
   _debugPrint("Calibration error:");
@@ -186,8 +180,7 @@ void setup() {
     safeDelay(calibrationError > 2000 ? 4000 : 2000);
   }
 
-  scale.set_scale(settings.calibrationFactor);
-  readTimerId = timer.setInterval(READ_INTERVAL, readScale);
+  scale.set_scale(settings.calibrationFactor);  
 
   // make sure the we have valid timers
   if (settings.powerOffTimerSec < 30) {
@@ -202,7 +195,7 @@ void setup() {
   powerOffTimerId = timer.setTimeout(settings.powerOffTimerSec * 1000, powerOff);
   idleTimerId = timer.setInterval(settings.idlePowerOffTimerSec * 1000, powerOff);
   
-  // fade out the LOGO led after 10s
+  // fade out the LOGO led after 5s
   timer.setTimeout(5000, []() {
     uint16_t brightness = 200;
     long lastTime = 0, currentTime;
@@ -218,22 +211,17 @@ void setup() {
     digitalWrite(LOGO_LED_PIN, LOW);
   });
   
-  server.client().setTimeout(300);
-  server.on ( "/api/calibrate", HTTP_POST, handleCalibrate );
-  server.on ( "/api/settings", HTTP_PATCH, handleSettingsChanged );
-  server.on ( "/api/settings", HTTP_GET, handleGetSettings );
-  server.on ( "/api/weight", HTTP_GET, handleGetWeight );
-  server.on ( "/api/weight", HTTP_POST, handlePostWeight );
-  server.on ( "/api/tare", HTTP_POST, handleTare );
-  server.on ( "/api/device/poweroff", HTTP_POST, handlePowerOff );
-  server.on ( "/api/device/reset", HTTP_POST, handleReset );
-  server.on ( "/api/device/info", HTTP_GET, handleInfo );
-  server.on ( "/api/device/calibrate-adc", HTTP_POST, handleCalibrateAdc );
-  server.begin();   // Start the webserver;
-  yield();
-  _debugPrintln("Server listening");
-  
+}
+
+// -------------------------------------------------------------------------
+/**
+ * Called when device is ready for operation (after 3s from boot)
+ */
+void onReady()
+{
+  readTimerId = timer.setInterval(READ_INTERVAL, readScale);
   display.clearDisplay();
+  display.display();
   
   // get battery level
   float voltage = readVoltage();
@@ -246,33 +234,29 @@ void setup() {
     display.display();
     safeDelay(3000);
     display.clearDisplay();
-  }
-  yield();
+  }  
 
-  DisplayHelper displayHelper(&display);
-  if (WiFi.status() == WL_CONNECTED) {
-    displayHelper.renderSignalStrength(WiFi.RSSI());
-  } else {
-    displayHelper.renderWiFiDisconnected();
-  }
-  displayHelper.renderBatteryLevel(batteryLevel);
-  displayHelper.renderAll();
+  displayHelper.renderBatteryLevel(batteryLevel);  
+  displayHelper.renderAll();  
+   
 }
 
 // -------------------------------------------------------------------------
+
 /**
  * Connect to WiFi
  */
-void wifiConfig()
+void wifiConnect()
 {
-  display.fillRect(0, 30, 84, 18, WHITE);
-  strcpy(displayBuffer, "AP ");
+  wifiConnectStarted = true;  
+  display.setTextSize(1);
+  display.fillRect(0, 35, 84, 18, WHITE);
+  strcpy(displayBuffer, "SSID ");
   strcat(displayBuffer, WiFi.SSID().c_str());
   _debugPrintln(displayBuffer);
-  display.setCursor(0, 30);
-  display.println(displayBuffer);
-  display.display();
-  yield();
+  display.setCursor(0, 25);
+  display.print(displayBuffer);
+  display.display();  
 
   //set custom ip for portal
   IPAddress _ip, _gw, _sn;
@@ -284,32 +268,33 @@ void wifiConfig()
     _debugPrint("Using static IP: ");
     _debugPrintln(settings.ip);
     WiFi.config(_ip, _gw, _gw, _sn);
-  }
-  yield();
+  }  
   WiFi.begin(WiFi.SSID().c_str(), WiFi.psk().c_str());
 
-  yield();
+  display.setCursor(0, 35);
 
-  int counter = 0;
-  // 15s timeout
-  while (WiFi.status() != WL_CONNECTED && (counter <= 150)) {
-    if (counter % 15 == 0) {
+  uint startTime = millis(), lastUpdate = startTime;  
+  while (WiFi.status() != WL_CONNECTED && (millis() - startTime) <= WIFI_CONNECT_TIMEOUT) {
+    if (millis() - lastUpdate > 1000) {
+      lastUpdate = millis();
       _debugPrint(".");
       display.print(".");
       display.display();
-    }
+    }    
     delay(100);
-    counter++;
   }
 
   if (WiFi.status() != WL_CONNECTED) {
     _debugPrintln("Could not connect to WiFi");
+    displayHelper.renderWiFiDisconnected();
   } else {
     _debugPrint("Wifi connected. IP Address: ");
     _debugPrintln(WiFi.localIP());
     _debugPrint("Signal strength: ");
     _debugPrintln(WiFi.RSSI());
+    displayHelper.renderSignalStrength(WiFi.RSSI());
   }
+  displayHelper.renderAll();   
 }
 
 // -------------------------------------------------------------------------
@@ -332,7 +317,7 @@ float readADC()
 // -------------------------------------------------------------------------
 
 /**
- * Read volage using ADC pin on ESP8266
+ * Read voltage using ADC pin on ESP8266
  * Output voltage should be between 0 - ~5v
  */
 float readVoltage()
@@ -406,12 +391,18 @@ uint8_t getLiPoBatteryLevel(float voltage)
 // -------------------------------------------------------------------------
 /**
  * Turn tbe device off by putting the keep-alive pin low
+ * turn off wifi, display and enter deep sleep when doing a soft power off.
+ * In case you don't build the power-on latching circuitry this might come handy
  */
 void powerOff()
 {
   _debugPrintln("Power off.");
-  WiFi.mode(WIFI_OFF);
-  digitalWrite(PW_SW_PIN, LOW);
+  WiFi.mode(WIFI_OFF);  
+  display.clearDisplay();
+  display.display();        // copy buffer to display memory
+  display.command( PCD8544_FUNCTIONSET | PCD8544_POWERDOWN);
+  digitalWrite(PW_SW_PIN, LOW);  
+  ESP.deepSleep(0);
 }
 
 // -------------------------------------------------------------------------
@@ -423,8 +414,8 @@ void handleCalibrateAdc()
   char result[100];
   HealthzuillaScaleSettings oldSettings = settings;
   
-  if (server.hasArg("voltage")) {
-    refVoltage = server.arg("voltage").toFloat();
+  if (httpsServer.hasArg("voltage")) {
+    refVoltage = httpsServer.arg("voltage").toFloat();
     if (refVoltage >= 3 && refVoltage <= 4.35) {
       // oldFactor is needed for revert in case the calibration failed
       double oldFactor = settings.voltageCalibrationFactor;
@@ -436,14 +427,14 @@ void handleCalibrateAdc()
         settings.voltageCalibrationFactor = oldFactor;
         
         snprintf(result, sizeof(result), "{\"error\": \"true\", \"message\": \"Calibration failed. Difference is %.2f\"}", diff);
-        server.send ( 400, "application/json", result );  
+        httpsServer.send ( 400, "application/json", result );  
         return;
       } else {
         // save to EEPROM
         EEPROM_writeAnything(CONFIG_START_ADDR, settings, oldSettings);
     
         snprintf(result, sizeof(result), "{\"success\": \"true\", \"message\": \"Calibration successful. Difference is %.2f\"}", diff);
-        server.send ( 200, "application/json", result );  
+        httpsServer.send ( 200, "application/json", result );  
         return;
       }
     }
@@ -451,15 +442,17 @@ void handleCalibrateAdc()
 
   _debugPrintln("Invalid voltage parameter.");
   sendCORSHeaders();
-  server.send ( 400, "application/json", "{\"error\": \"true\", \"message\": \"Invalid voltage. Must be between 3 - 4.35v\"}" );  
+  httpsServer.send ( 400, "application/json", "{\"error\": \"true\", \"message\": \"Invalid voltage. Must be between 3 - 4.35v\"}" );  
 }
+
+// -------------------------------------------------------------------------
 
 void sendCORSHeaders()
 {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.sendHeader("Access-Control-Allow-Methods", "POST, GET, PATCH");
-  server.sendHeader("Access-Control-Max-Age", "1000");
-  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  httpsServer.sendHeader("Access-Control-Allow-Origin", "*");
+  httpsServer.sendHeader("Access-Control-Allow-Methods", "POST, GET, PATCH");
+  httpsServer.sendHeader("Access-Control-Max-Age", "1000");
+  httpsServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 // -------------------------------------------------------------------------
 
@@ -501,7 +494,7 @@ void handleInfo()
   );
 
   sendCORSHeaders();
-  server.send ( 200, "application/json", result );
+  httpsServer.send ( 200, "application/json", result );
 }
 // ---------------------------------------------------------------------------
 
@@ -509,7 +502,7 @@ void handleTare()
 {
   _debugPrintln("Tare API request");
   sendCORSHeaders();
-  server.send ( 200, "application/json", "{\"success\": true}");
+  httpsServer.send ( 200, "application/json", "{\"success\": true}");
   scale.tare(5);
 }
 
@@ -519,7 +512,7 @@ void handleReset()
 {
   _debugPrintln("Reset API request");
   sendCORSHeaders();
-  server.send ( 200, "application/json", "{\"success\": true}");
+  httpsServer.send ( 200, "application/json", "{\"success\": true}");
   delay(900);
   ESP.reset();
 }
@@ -530,10 +523,12 @@ void handlePowerOff()
 {
   _debugPrintln("Power Off API request");
   sendCORSHeaders();
-  server.send ( 200, "application/json", "{\"success\": true}");
+  httpsServer.send ( 200, "application/json", "{\"success\": true}");
   delay(900);
   powerOff();
 }
+
+// -------------------------------------------------------------------------
 
 void handleGetWeight()
 {
@@ -550,8 +545,10 @@ void handleGetWeight()
          );
 
   sendCORSHeaders();
-  server.send ( 200, "application/json", result );
+  httpsServer.send ( 200, "application/json", result );
 }
+
+// -------------------------------------------------------------------------
 
 void handleGetSettings()
 {
@@ -583,8 +580,10 @@ void handleGetSettings()
          );
 
   sendCORSHeaders();
-  server.send ( 200, "application/json", result );
+  httpsServer.send ( 200, "application/json", result );
 }
+
+// -------------------------------------------------------------------------
 
 void handlePostWeight()
 {
@@ -592,9 +591,9 @@ void handlePostWeight()
 
   sendCORSHeaders();
 
-  if (server.hasArg("foodId") && server.hasArg("calories")) {
-    String foodId = server.arg("foodId");
-    String foodName = server.arg("name");
+  if (httpsServer.hasArg("foodId") && httpsServer.hasArg("calories")) {
+    String foodId = httpsServer.arg("foodId");
+    String foodName = httpsServer.arg("name");
     
     if (foodId.length() < sizeof(foodInfo.foodId)) {
       foodId = foodId.substring(0, sizeof(foodInfo.foodId));
@@ -605,8 +604,8 @@ void handlePostWeight()
       foodName = foodName.substring(0, sizeof(foodInfo.name));
     }
     strcpy(foodInfo.name, foodName.c_str());
-    foodInfo.calories = server.arg("calories").toInt();
-    server.send ( 200, "application/json", "{\"success\": true}");
+    foodInfo.calories = httpsServer.arg("calories").toInt();
+    httpsServer.send ( 200, "application/json", "{\"success\": true}");
 
     // display the food name
     display.fillRect(0, 0, 84, 18, WHITE);
@@ -617,10 +616,12 @@ void handlePostWeight()
     display.display();
 
   } else {
-    server.send ( 400, "application/json", "{\"error\": \"Invalid params.\"}");
+    httpsServer.send ( 400, "application/json", "{\"error\": \"Invalid params.\"}");
   }
 
 }
+
+// -------------------------------------------------------------------------
 
 void handleCalibrate()
 {
@@ -675,7 +676,7 @@ void handleCalibrate()
   EEPROM_writeAnything(CONFIG_START_ADDR, settings, oldSettings);
 
   sendCORSHeaders();
-  server.send ( 200, "application/json", "{\"success\": true}" );
+  httpsServer.send ( 200, "application/json", "{\"success\": true}" );
   
   timer.enable(readTimerId);
   display.clearDisplay();
@@ -685,38 +686,40 @@ void handleCalibrate()
   display.clearDisplay();
 }
 
+// -------------------------------------------------------------------------
+
 void handleSettingsChanged()
 {
   _debugPrintln("Settings changed API request");
 
   HealthzuillaScaleSettings oldSettings = settings;
 
-  if (server.hasArg("useStaticIp")) {
-    settings.useStaticIp = server.arg("useStaticIp") == "1" ? true : false;
+  if (httpsServer.hasArg("useStaticIp")) {
+    settings.useStaticIp = httpsServer.arg("useStaticIp") == "1" ? true : false;
     _debugPrint("useStaticIp:")
     _debugPrintln(settings.useStaticIp);
   }
 
-  if (server.hasArg("ip")) {
-    strcpy(settings.ip, server.arg("ip").c_str());
+  if (httpsServer.hasArg("ip")) {
+    strcpy(settings.ip, httpsServer.arg("ip").c_str());
     _debugPrint("ip:");
     _debugPrintln(settings.ip);
   }
 
-  if (server.hasArg("gateway")) {
-    strcpy(settings.gateway, server.arg("gateway").c_str());
+  if (httpsServer.hasArg("gateway")) {
+    strcpy(settings.gateway, httpsServer.arg("gateway").c_str());
     _debugPrint("gateway:");
     _debugPrintln(settings.gateway);
   }
 
-  if (server.hasArg("subnetMask")) {
-    strcpy(settings.subnetMask, server.arg("subnetMask").c_str());
+  if (httpsServer.hasArg("subnetMask")) {
+    strcpy(settings.subnetMask, httpsServer.arg("subnetMask").c_str());
     _debugPrint("subnetMask:");
     _debugPrintln(settings.subnetMask);
   }
 
-  if (server.hasArg("calibrationWeight")) {
-    float calibrationWeight = server.arg("calibrationWeight").toFloat();
+  if (httpsServer.hasArg("calibrationWeight")) {
+    float calibrationWeight = httpsServer.arg("calibrationWeight").toFloat();
     if (calibrationWeight > 0 && calibrationWeight < 5000) {
       settings.calibrationWeight = calibrationWeight;
     }
@@ -724,8 +727,8 @@ void handleSettingsChanged()
     _debugPrintln(settings.calibrationWeight);
   }
 
-  if (server.hasArg("powerOffTimerSec")) {
-    uint16_t powerOffTimerSec = server.arg("powerOffTimerSec").toInt();
+  if (httpsServer.hasArg("powerOffTimerSec")) {
+    uint16_t powerOffTimerSec = httpsServer.arg("powerOffTimerSec").toInt();
     if (powerOffTimerSec > 30) { // at least 30s
       settings.powerOffTimerSec = powerOffTimerSec;
     }
@@ -733,8 +736,8 @@ void handleSettingsChanged()
     _debugPrintln(settings.powerOffTimerSec);
   }
 
-  if (server.hasArg("idlePowerOffTimerSec")) {
-    uint16_t idlePowerOffTimerSec = server.arg("idlePowerOffTimerSec").toInt();
+  if (httpsServer.hasArg("idlePowerOffTimerSec")) {
+    uint16_t idlePowerOffTimerSec = httpsServer.arg("idlePowerOffTimerSec").toInt();
     if (idlePowerOffTimerSec > 30) { // at least 30s
       settings.idlePowerOffTimerSec = idlePowerOffTimerSec;
     }
@@ -746,8 +749,10 @@ void handleSettingsChanged()
   EEPROM_writeAnything(CONFIG_START_ADDR, settings, oldSettings);
 
   sendCORSHeaders();
-  server.send ( 200, "application/json", "{\"success\": true}" );
+  httpsServer.send ( 200, "application/json", "{\"success\": true}" );
 }
+
+// -------------------------------------------------------------------------
 
 void saveConfigCallback()
 {
@@ -758,21 +763,25 @@ void saveConfigCallback()
   EEPROM_writeAnything(CONFIG_START_ADDR, settings, oldSettings);
 }
 
-void handleTareButton()
+// -------------------------------------------------------------------------
+
+void poolTareButton()
 {
   int reading = digitalRead(TARE_BTN_PIN);
 
-  // If the switch changed and it's pressed, tare
-  if (reading != lastButtonState && reading == HIGH) {
-    // reset the debouncing timer
-    lastDebounceTime = millis();
-     _debugPrintln("Tare Pressed");
-    scale.tare(5);
-  }
-
-  if ((millis() - lastDebounceTime) > longPressTime && reading == HIGH) {
-      _debugPrintln("Long tare button press. Powering off...");
-      powerOff();
+  if ((millis() - lastDebounceTime) > SHORT_PRESS_TIME && reading == HIGH) {
+      if (!wifiConnectStarted) {
+        display.clearDisplay();        
+        wifiConnectStarted = true; // set true for next time we press the button        
+        timer.disable(wifiStartTimer);
+        display.fillRect(0, 35, 84, 18, WHITE);
+        display.display();        
+      } else {
+        _debugPrintln("Tare Pressed");      
+        updateScaleDisplayReading(0);
+        scale.tare(3);        
+        _debugPrintln("Tare done");
+      }
   }
 
   // save the reading. Next time through the loop, it'll be the lastButtonState:
@@ -782,16 +791,37 @@ void handleTareButton()
 //=============================================================================================
 //                         LOOP
 //=============================================================================================
-void loop() {
-  server.handleClient();    //Handling of incoming requests
+void loop()
+{  
+  httpsServer.handleClient();    //Handling of incoming requests
   // Call the double reset detector loop method every so often,
   // so that it can recognise when the timeout expires.
   // You can also call drd.stop() when you wish to no longer
   // consider the next reset as a double reset.
   drd.loop();
   timer.run();
-  handleTareButton();
+  poolTareButton();
+  MDNS.update();
 }
+
+// -------------------------------------------------------------------------
+
+void updateScaleDisplayReading(float reading)
+{
+  display.fillRect(0, 18, 84, 38, WHITE);
+  display.setTextSize(2);  
+  display.setCursor(0, 18);
+  sprintf(displayBuffer, "%.1fg", round(reading * 10) / 10.0, 1);
+  display.println(displayBuffer);
+  if (foodInfo.calories > 0) {
+    display.setCursor(0, 34);
+    sprintf(displayBuffer, "%dcal", round((reading * foodInfo.calories) / 100.0));
+    display.println(displayBuffer);
+  }
+  display.display();
+}
+
+// -------------------------------------------------------------------------
 
 void readScale()
 {
@@ -823,28 +853,15 @@ void readScale()
   // set the reading to the moving average
   reading = average.get();
 
-  display.fillRect(0, 18, 84, 38, WHITE);
-  display.setTextSize(2);
-
-  // normalize reading
+    // normalize reading
   if (fabs(reading) < 1 && fabs(reading) > 0) {
     reading = 0;
   }
 
-  yield();
-  
-  display.setCursor(0, 18);
-  sprintf(displayBuffer, "%.1fg", round(reading * 10) / 10.0, 1);
-  display.println(displayBuffer);
-  if (foodInfo.calories > 0) {
-    display.setCursor(0, 34);
-    sprintf(displayBuffer, "%dcal", round((reading * foodInfo.calories) / 100.0));
-    display.println(displayBuffer);
-  }
-  display.display();
-  
-  yield();
+  updateScaleDisplayReading(reading);  
 }
+
+// -------------------------------------------------------------------------
 
 /**
  * Delay, but prevent WDT reset
@@ -861,6 +878,8 @@ void safeDelay(uint32_t milliseconds)
   // at the end delay for the difference
   delay(milliseconds % delayTime);
 }
+
+// -------------------------------------------------------------------------
 
 /**
  * Simple routine to blink the built-in led once with a 300ms delay
