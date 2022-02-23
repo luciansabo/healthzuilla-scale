@@ -1,3 +1,6 @@
+### v 2022.3
+- reverted to non-SSL because SSL was too slow for ESP8266 even with a 160 Mhz clock
+
 ### v 2022.2
 - use SSL (https) for api endpoints. self signed certificate provided and generation script
 - use mDNS responder
