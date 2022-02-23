@@ -1,6 +1,5 @@
 // comment/undef this to disable debugging
 //#define DEBUG 1
-#include "ssl/ssl-config.h";
 
 // Pins
 #define LCD_DC_PIN      D6 // scale DC pin

@@ -37,7 +37,7 @@ Adafruit_PCD8544 display = Adafruit_PCD8544(LCD_DC_PIN, 0, 0);
 DisplayHelper displayHelper(&display);
 WiFiManager wifiManager;
 DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
-BearSSL::ESP8266WebServerSecure httpsServer(443);
+ESP8266WebServer httpServer(80);
 SimpleTimer timer;
 int readTimerId, powerOffTimerId, idleTimerId, wifiStartTimer;
 float reading;
@@ -143,19 +143,18 @@ void setup()
   timer.setTimeout(3000, onReady);  
   wifiStartTimer = timer.setTimeout(3100, wifiConnect);
 
-  httpsServer.client().setTimeout(300);
-  httpsServer.on ( "/api/calibrate", HTTP_POST, handleCalibrate );
-  httpsServer.on ( "/api/settings", HTTP_PATCH, handleSettingsChanged );
-  httpsServer.on ( "/api/settings", HTTP_GET, handleGetSettings );
-  httpsServer.on ( "/api/weight", HTTP_GET, handleGetWeight );
-  httpsServer.on ( "/api/weight", HTTP_POST, handlePostWeight );
-  httpsServer.on ( "/api/tare", HTTP_POST, handleTare );
-  httpsServer.on ( "/api/device/poweroff", HTTP_POST, handlePowerOff );
-  httpsServer.on ( "/api/device/reset", HTTP_POST, handleReset );
-  httpsServer.on ( "/api/device/info", HTTP_GET, handleInfo );
-  httpsServer.on ( "/api/device/calibrate-adc", HTTP_POST, handleCalibrateAdc );
-  httpsServer.begin();   // Start the webserver;    
-  httpsServer.getServer().setRSACert(new BearSSL::X509List(serverCert), new BearSSL::PrivateKey(serverKey));
+  httpServer.client().setTimeout(300);
+  httpServer.on ( "/api/calibrate", HTTP_POST, handleCalibrate );
+  httpServer.on ( "/api/settings", HTTP_PATCH, handleSettingsChanged );
+  httpServer.on ( "/api/settings", HTTP_GET, handleGetSettings );
+  httpServer.on ( "/api/weight", HTTP_GET, handleGetWeight );
+  httpServer.on ( "/api/weight", HTTP_POST, handlePostWeight );
+  httpServer.on ( "/api/tare", HTTP_POST, handleTare );
+  httpServer.on ( "/api/device/poweroff", HTTP_POST, handlePowerOff );
+  httpServer.on ( "/api/device/reset", HTTP_POST, handleReset );
+  httpServer.on ( "/api/device/info", HTTP_GET, handleInfo );
+  httpServer.on ( "/api/device/calibrate-adc", HTTP_POST, handleCalibrateAdc );
+  httpServer.begin();   // Start the webserver;      
   _debugPrintln("Server listening");
 
   // Start the mDNS responder
@@ -414,8 +413,8 @@ void handleCalibrateAdc()
   char result[100];
   HealthzuillaScaleSettings oldSettings = settings;
   
-  if (httpsServer.hasArg("voltage")) {
-    refVoltage = httpsServer.arg("voltage").toFloat();
+  if (httpServer.hasArg("voltage")) {
+    refVoltage = httpServer.arg("voltage").toFloat();
     if (refVoltage >= 3 && refVoltage <= 4.35) {
       // oldFactor is needed for revert in case the calibration failed
       double oldFactor = settings.voltageCalibrationFactor;
@@ -427,14 +426,14 @@ void handleCalibrateAdc()
         settings.voltageCalibrationFactor = oldFactor;
         
         snprintf(result, sizeof(result), "{\"error\": \"true\", \"message\": \"Calibration failed. Difference is %.2f\"}", diff);
-        httpsServer.send ( 400, "application/json", result );  
+        httpServer.send ( 400, "application/json", result );  
         return;
       } else {
         // save to EEPROM
         EEPROM_writeAnything(CONFIG_START_ADDR, settings, oldSettings);
     
         snprintf(result, sizeof(result), "{\"success\": \"true\", \"message\": \"Calibration successful. Difference is %.2f\"}", diff);
-        httpsServer.send ( 200, "application/json", result );  
+        httpServer.send ( 200, "application/json", result );  
         return;
       }
     }
@@ -442,17 +441,17 @@ void handleCalibrateAdc()
 
   _debugPrintln("Invalid voltage parameter.");
   sendCORSHeaders();
-  httpsServer.send ( 400, "application/json", "{\"error\": \"true\", \"message\": \"Invalid voltage. Must be between 3 - 4.35v\"}" );  
+  httpServer.send ( 400, "application/json", "{\"error\": \"true\", \"message\": \"Invalid voltage. Must be between 3 - 4.35v\"}" );  
 }
 
 // -------------------------------------------------------------------------
 
 void sendCORSHeaders()
 {
-  httpsServer.sendHeader("Access-Control-Allow-Origin", "*");
-  httpsServer.sendHeader("Access-Control-Allow-Methods", "POST, GET, PATCH");
-  httpsServer.sendHeader("Access-Control-Max-Age", "1000");
-  httpsServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  httpServer.sendHeader("Access-Control-Allow-Origin", "*");
+  httpServer.sendHeader("Access-Control-Allow-Methods", "POST, GET, PATCH");
+  httpServer.sendHeader("Access-Control-Max-Age", "1000");
+  httpServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 // -------------------------------------------------------------------------
 
@@ -461,8 +460,7 @@ void handleInfo()
   _debugPrintln("Get info API request");
   float voltage = readVoltage();
   uint8_t batteryLevel = getLiPoBatteryLevel(voltage);
-  char result[500];
-  yield();
+  char result[500];  
  
   snprintf(result, sizeof(result),
       "{\n"
@@ -494,7 +492,7 @@ void handleInfo()
   );
 
   sendCORSHeaders();
-  httpsServer.send ( 200, "application/json", result );
+  httpServer.send ( 200, "application/json", result );
 }
 // ---------------------------------------------------------------------------
 
@@ -502,7 +500,7 @@ void handleTare()
 {
   _debugPrintln("Tare API request");
   sendCORSHeaders();
-  httpsServer.send ( 200, "application/json", "{\"success\": true}");
+  httpServer.send ( 200, "application/json", "{\"success\": true}");
   scale.tare(5);
 }
 
@@ -512,7 +510,7 @@ void handleReset()
 {
   _debugPrintln("Reset API request");
   sendCORSHeaders();
-  httpsServer.send ( 200, "application/json", "{\"success\": true}");
+  httpServer.send ( 200, "application/json", "{\"success\": true}");
   delay(900);
   ESP.reset();
 }
@@ -523,7 +521,7 @@ void handlePowerOff()
 {
   _debugPrintln("Power Off API request");
   sendCORSHeaders();
-  httpsServer.send ( 200, "application/json", "{\"success\": true}");
+  httpServer.send ( 200, "application/json", "{\"success\": true}");
   delay(900);
   powerOff();
 }
@@ -545,7 +543,7 @@ void handleGetWeight()
          );
 
   sendCORSHeaders();
-  httpsServer.send ( 200, "application/json", result );
+  httpServer.send ( 200, "application/json", result );
 }
 
 // -------------------------------------------------------------------------
@@ -580,7 +578,7 @@ void handleGetSettings()
          );
 
   sendCORSHeaders();
-  httpsServer.send ( 200, "application/json", result );
+  httpServer.send ( 200, "application/json", result );
 }
 
 // -------------------------------------------------------------------------
@@ -591,9 +589,9 @@ void handlePostWeight()
 
   sendCORSHeaders();
 
-  if (httpsServer.hasArg("foodId") && httpsServer.hasArg("calories")) {
-    String foodId = httpsServer.arg("foodId");
-    String foodName = httpsServer.arg("name");
+  if (httpServer.hasArg("foodId") && httpServer.hasArg("calories")) {
+    String foodId = httpServer.arg("foodId");
+    String foodName = httpServer.arg("name");
     
     if (foodId.length() < sizeof(foodInfo.foodId)) {
       foodId = foodId.substring(0, sizeof(foodInfo.foodId));
@@ -604,8 +602,8 @@ void handlePostWeight()
       foodName = foodName.substring(0, sizeof(foodInfo.name));
     }
     strcpy(foodInfo.name, foodName.c_str());
-    foodInfo.calories = httpsServer.arg("calories").toInt();
-    httpsServer.send ( 200, "application/json", "{\"success\": true}");
+    foodInfo.calories = httpServer.arg("calories").toInt();
+    httpServer.send ( 200, "application/json", "{\"success\": true}");
 
     // display the food name
     display.fillRect(0, 0, 84, 18, WHITE);
@@ -616,7 +614,7 @@ void handlePostWeight()
     display.display();
 
   } else {
-    httpsServer.send ( 400, "application/json", "{\"error\": \"Invalid params.\"}");
+    httpServer.send ( 400, "application/json", "{\"error\": \"Invalid params.\"}");
   }
 
 }
@@ -676,7 +674,7 @@ void handleCalibrate()
   EEPROM_writeAnything(CONFIG_START_ADDR, settings, oldSettings);
 
   sendCORSHeaders();
-  httpsServer.send ( 200, "application/json", "{\"success\": true}" );
+  httpServer.send ( 200, "application/json", "{\"success\": true}" );
   
   timer.enable(readTimerId);
   display.clearDisplay();
@@ -694,32 +692,32 @@ void handleSettingsChanged()
 
   HealthzuillaScaleSettings oldSettings = settings;
 
-  if (httpsServer.hasArg("useStaticIp")) {
-    settings.useStaticIp = httpsServer.arg("useStaticIp") == "1" ? true : false;
+  if (httpServer.hasArg("useStaticIp")) {
+    settings.useStaticIp = httpServer.arg("useStaticIp") == "1" ? true : false;
     _debugPrint("useStaticIp:")
     _debugPrintln(settings.useStaticIp);
   }
 
-  if (httpsServer.hasArg("ip")) {
-    strcpy(settings.ip, httpsServer.arg("ip").c_str());
+  if (httpServer.hasArg("ip")) {
+    strcpy(settings.ip, httpServer.arg("ip").c_str());
     _debugPrint("ip:");
     _debugPrintln(settings.ip);
   }
 
-  if (httpsServer.hasArg("gateway")) {
-    strcpy(settings.gateway, httpsServer.arg("gateway").c_str());
+  if (httpServer.hasArg("gateway")) {
+    strcpy(settings.gateway, httpServer.arg("gateway").c_str());
     _debugPrint("gateway:");
     _debugPrintln(settings.gateway);
   }
 
-  if (httpsServer.hasArg("subnetMask")) {
-    strcpy(settings.subnetMask, httpsServer.arg("subnetMask").c_str());
+  if (httpServer.hasArg("subnetMask")) {
+    strcpy(settings.subnetMask, httpServer.arg("subnetMask").c_str());
     _debugPrint("subnetMask:");
     _debugPrintln(settings.subnetMask);
   }
 
-  if (httpsServer.hasArg("calibrationWeight")) {
-    float calibrationWeight = httpsServer.arg("calibrationWeight").toFloat();
+  if (httpServer.hasArg("calibrationWeight")) {
+    float calibrationWeight = httpServer.arg("calibrationWeight").toFloat();
     if (calibrationWeight > 0 && calibrationWeight < 5000) {
       settings.calibrationWeight = calibrationWeight;
     }
@@ -727,8 +725,8 @@ void handleSettingsChanged()
     _debugPrintln(settings.calibrationWeight);
   }
 
-  if (httpsServer.hasArg("powerOffTimerSec")) {
-    uint16_t powerOffTimerSec = httpsServer.arg("powerOffTimerSec").toInt();
+  if (httpServer.hasArg("powerOffTimerSec")) {
+    uint16_t powerOffTimerSec = httpServer.arg("powerOffTimerSec").toInt();
     if (powerOffTimerSec > 30) { // at least 30s
       settings.powerOffTimerSec = powerOffTimerSec;
     }
@@ -736,8 +734,8 @@ void handleSettingsChanged()
     _debugPrintln(settings.powerOffTimerSec);
   }
 
-  if (httpsServer.hasArg("idlePowerOffTimerSec")) {
-    uint16_t idlePowerOffTimerSec = httpsServer.arg("idlePowerOffTimerSec").toInt();
+  if (httpServer.hasArg("idlePowerOffTimerSec")) {
+    uint16_t idlePowerOffTimerSec = httpServer.arg("idlePowerOffTimerSec").toInt();
     if (idlePowerOffTimerSec > 30) { // at least 30s
       settings.idlePowerOffTimerSec = idlePowerOffTimerSec;
     }
@@ -749,7 +747,7 @@ void handleSettingsChanged()
   EEPROM_writeAnything(CONFIG_START_ADDR, settings, oldSettings);
 
   sendCORSHeaders();
-  httpsServer.send ( 200, "application/json", "{\"success\": true}" );
+  httpServer.send ( 200, "application/json", "{\"success\": true}" );
 }
 
 // -------------------------------------------------------------------------
@@ -793,7 +791,7 @@ void poolTareButton()
 //=============================================================================================
 void loop()
 {  
-  httpsServer.handleClient();    //Handling of incoming requests
+  httpServer.handleClient();    //Handling of incoming requests
   // Call the double reset detector loop method every so often,
   // so that it can recognise when the timeout expires.
   // You can also call drd.stop() when you wish to no longer
@@ -826,7 +824,7 @@ void updateScaleDisplayReading(float reading)
 void readScale()
 {
   long prevAvg = average.get();
-  reading = scale.get_units(7);
+  reading = scale.get_units(5);
   average.update(reading);
   
   // when diff between average and current reading is less than 1 gram stabilize reading
